@@ -92,14 +92,15 @@ def generate_ai_reply(page_id: str, comment_text: str) -> str:
     for model_name in ["gemini-3.8-flash", "gemini-3.5-flash"]:
         try:
             response = client.models.generate_content(
-                model=model_name,
-                contents=prompt,
-                config=types.GenerateContentConfig(
-                    system_instruction=system_instruction,
-                    temperature=0.85,
-                    max_output_tokens=80,
-                ),
-            )
+            model="gemini-3.8-flash",
+            contents=prompt,
+            config=types.GenerateContentConfig(
+                system_instruction=system_instruction,
+                temperature=0.85,
+                max_output_tokens=300,
+                thinking_config=types.ThinkingConfig(thinking_budget=0),
+            ),
+        )
             reply = response.text.strip().strip('"').strip("'")
             if reply:
                 return reply

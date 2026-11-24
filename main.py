@@ -73,28 +73,41 @@ def record_reply(page_id: str):
     reply_timestamps[page_id].append(time.time())
 
 def generate_ai_reply(page_id: str, comment_text: str) -> str:
-    """สร้างข้อความตอบกลับด้วย Gemini AI ให้สั้นและเป็นธรรมชาติ"""
+    """สร้างข้อความตอบกลับด้วย Gemini AI พร้อมระบบสลับโมเดลสำรองเมื่อ API หนาแน่น"""
+    fallback_replies = [
+        "ขอบคุณครับ 🙏",
+        "ยินดีเลยครับผม",
+        "ขอบคุณที่ติดตามนะครับ",
+        "ขอบคุณคร้าบ",
+        "ฝากติดตามข่าวสารกันต่อนะครับ 🙏"
+    ]
+
     if not client:
-        return random.choice(["ขอบคุณคร้าบ 🙏", "จริงเลยครับ", "ขอบคุณที่ติดตามนะครับ"])
+        return random.choice(fallback_replies)
 
     system_instruction = PAGE_PERSONAS.get(page_id, DEFAULT_PERSONA)
     prompt = f"ลูกเพจคอมเมนต์ว่า: \"{comment_text}\"\nพิมพ์ตอบกลับสั้นๆ 1 ประโยค:"
 
-    try:
-        response = client.models.generate_content(
-            model="gemini-3.8-flash",
-            contents=prompt,
-            config=types.GenerateContentConfig(
-                system_instruction=system_instruction,
-                temperature=0.85,
-                max_output_tokens=80,
-            ),
-        )
-        reply = response.text.strip().strip('"').strip("'")
-        return reply if reply else "ขอบคุณครับ 🙏"
-    except Exception as e:
-        print(f"Gemini API Error: {e}")
-        return "ขอบคุณที่ร่วมแสดงความคิดเห็นครับ 🙏"
+    # ลองเรียกโมเดลหลัก (gemini-3.8-flash) ก่อน หากหนาแน่น (503) ให้สลับไป gemini-3.5-flash
+    for model_name in ["gemini-3.8-flash", "gemini-3.5-flash"]:
+        try:
+            response = client.models.generate_content(
+                model=model_name,
+                contents=prompt,
+                config=types.GenerateContentConfig(
+                    system_instruction=system_instruction,
+                    temperature=0.85,
+                    max_output_tokens=80,
+                ),
+            )
+            reply = response.text.strip().strip('"').strip("'")
+            if reply:
+                return reply
+        except Exception as e:
+            print(f"Gemini API Error ({model_name}): {e}")
+            continue
+
+    return random.choice(fallback_replies)
 
 def like_comment(comment_id: str, page_access_token: str):
     """กดถูกใจ (Like) คอมเมนต์"""

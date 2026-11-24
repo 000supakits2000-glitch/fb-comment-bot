@@ -26,7 +26,7 @@ except json.JSONDecodeError:
 client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
 
 # ระบบจำกัดจำนวนการตอบต่อชั่วโมง (ป้องกันโพสต์ไวรัลแล้วบอทตอบรัวเกินไป)
-MAX_REPLIES_PER_HOUR = 15
+MAX_REPLIES_PER_HOUR = 6
 reply_timestamps = {}  # เก็บประวัติเวลาที่ตอบของแต่ละเพจ
 
 # กำหนดบุคลิกและกฎเหล็กให้ตอบเหมือนคนไทยพิมพ์คุยจริงๆ

@@ -1,7 +1,9 @@
 import os
 import json
+import random
+import asyncio
 import requests
-from fastapi import FastAPI, Request, Response
+from fastapi import FastAPI, Request, Response, BackgroundTasks
 from google import genai
 from google.genai import types
 
@@ -76,6 +78,15 @@ def reply_to_comment(comment_id: str, message: str, page_access_token: str):
     except Exception as e:
         print(f"❌ Request Error: {e}")
 
+async def process_delayed_reply(page_id: str, comment_id: str, message: str, sender_name: str, page_token: str):
+    """ฟังก์ชันทำงานเบื้องหลัง: สุ่มหน่วงเวลา 60-120 วินาที แล้วค่อยสร้างคำตอบส่งกลับ"""
+    delay = random.randint(60, 120)
+    print(f"⏳ กำลังรอ {delay} วินาที ก่อนตอบคอมเมนต์ของ {sender_name} ({comment_id})...")
+    await asyncio.sleep(delay)
+
+    ai_reply = generate_ai_reply(page_id, message, sender_name)
+    reply_to_comment(comment_id, ai_reply, page_token)
+
 @app.get("/")
 async def health_check():
     """Endpoint สำหรับเช็กสถานะเซิร์ฟเวอร์บน Render"""
@@ -99,8 +110,8 @@ async def verify_webhook(request: Request):
     return Response(content="Verification failed", status_code=403)
 
 @app.post("/webhook")
-async def handle_webhook(request: Request):
-    """รับเหตุการณ์คอมเมนต์จาก Facebook และสั่งบอทตอบกลับ"""
+async def handle_webhook(request: Request, background_tasks: BackgroundTasks):
+    """รับเหตุการณ์คอมเมนต์จาก Facebook และสั่งบอทตอบกลับแบบหน่วงเวลาในพื้นหลัง"""
     try:
         body = await request.json()
     except Exception:
@@ -138,7 +149,14 @@ async def handle_webhook(request: Request):
                             continue
 
                         print(f"📩 คอมเมนต์ใหม่จากเพจ {page_id} โดย {sender_name}: {message}")
-                        ai_reply = generate_ai_reply(page_id, message, sender_name)
-                        reply_to_comment(comment_id, ai_reply, page_token)
+                        # โยนงานไปรอเวลาในพื้นหลัง เพื่อส่ง 200 OK กลับไปหา Facebook ทันที (ป้องกันตอบเบิ้ล)
+                        background_tasks.add_task(
+                            process_delayed_reply,
+                            page_id,
+                            comment_id,
+                            message,
+                            sender_name,
+                            page_token
+                        )
 
     return {"status": "ok"}

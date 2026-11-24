@@ -86,7 +86,7 @@ def generate_ai_reply(page_id: str, comment_text: str) -> str:
             contents=prompt,
             config=types.GenerateContentConfig(
                 system_instruction=system_instruction,
-                temperature=0.85,  # เพิ่มความหลากหลายของคำตอบไม่ให้ซ้ำเดิม
+                temperature=0.85,
                 max_output_tokens=80,
             ),
         )

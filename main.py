@@ -27,7 +27,9 @@ client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
 
 # ระบบจำกัดจำนวนการตอบต่อชั่วโมง (ป้องกันโพสต์ไวรัลแล้วบอทตอบรัวเกินไป)
 MAX_REPLIES_PER_HOUR = 6
-reply_timestamps = {}  # เก็บประวัติเวลาที่ตอบของแต่ละเพจ
+MAX_REPLIES_PER_USER_PER_HOUR = 2  # ป้องกันคนเดิมพิมพ์ปั่นหรือบอทชนบอท
+reply_timestamps = {}       # เก็บประวัติเวลาที่ตอบของแต่ละเพจ
+user_reply_timestamps = {}  # เก็บประวัติเวลาที่ตอบรายบุคคล: {(page_id, sender_id): deque()}
 
 # กำหนดบุคลิกและกฎเหล็กให้ตอบเหมือนคนไทยพิมพ์คุยจริงๆ
 ANTI_BOT_RULES = (
@@ -54,23 +56,44 @@ DEFAULT_PERSONA = (
     "คุณคือแอดมินเพจ Facebook ตอบคอมเมนต์ลูกเพจแบบคนกันเอง สั้นๆ ตรงประเด็น\n" + ANTI_BOT_RULES
 )
 
-def can_reply_now(page_id: str) -> bool:
-    """ตรวจสอบว่าเพจนี้ตอบเกินโควตาต่อชั่วโมงหรือยัง"""
+def can_reply_now(page_id: str, sender_id: str) -> tuple[bool, str]:
+    """ตรวจสอบโควตาทั้งภาพรวมของเพจ และโควตารายบุคคลต่อชั่วโมง"""
     now = time.time()
+
+    # 1. เช็กโควตาภาพรวมของเพจ
     if page_id not in reply_timestamps:
         reply_timestamps[page_id] = deque()
-
-    # ลบประวัติที่เก่าเกิน 1 ชั่วโมง (3600 วินาที) ออก
     while reply_timestamps[page_id] and now - reply_timestamps[page_id][0] > 3600:
         reply_timestamps[page_id].popleft()
 
-    return len(reply_timestamps[page_id]) < MAX_REPLIES_PER_HOUR
+    if len(reply_timestamps[page_id]) >= MAX_REPLIES_PER_HOUR:
+        return False, f"เกินโควตาเพจ ({MAX_REPLIES_PER_HOUR} ครั้ง/ชม.)"
 
-def record_reply(page_id: str):
-    """บันทึกเวลาที่ตอบสำเร็จ"""
+    # 2. เช็กโควตารายบุคคล (กันคนเดิมพิมพ์รัวๆ หรือบอทชนบอท)
+    if sender_id:
+        user_key = (page_id, sender_id)
+        if user_key not in user_reply_timestamps:
+            user_reply_timestamps[user_key] = deque()
+        while user_reply_timestamps[user_key] and now - user_reply_timestamps[user_key][0] > 3600:
+            user_reply_timestamps[user_key].popleft()
+
+        if len(user_reply_timestamps[user_key]) >= MAX_REPLIES_PER_USER_PER_HOUR:
+            return False, f"เกินโควตารายบุคคล ({MAX_REPLIES_PER_USER_PER_HOUR} ครั้ง/ชม. สำหรับผู้ใช้ {sender_id})"
+
+    return True, ""
+
+def record_reply(page_id: str, sender_id: str):
+    """บันทึกเวลาที่ตอบสำเร็จทั้งระดับเพจและรายบุคคล"""
+    now = time.time()
     if page_id not in reply_timestamps:
         reply_timestamps[page_id] = deque()
-    reply_timestamps[page_id].append(time.time())
+    reply_timestamps[page_id].append(now)
+
+    if sender_id:
+        user_key = (page_id, sender_id)
+        if user_key not in user_reply_timestamps:
+            user_reply_timestamps[user_key] = deque()
+        user_reply_timestamps[user_key].append(now)
 
 def fetch_post_context(post_id: str, page_access_token: str) -> str:
     """ดึงข้อความของโพสต์ต้นทางเพื่อให้ AI ตอบคอมเมนต์ได้ตรงบริบท"""
@@ -86,7 +109,7 @@ def fetch_post_context(post_id: str, page_access_token: str) -> str:
         if res.status_code == 200:
             data = res.json()
             post_text = data.get("message") or data.get("story") or ""
-            return post_text.strip()[:600]  # ตัดข้อความไม่ให้ยาวเกินไป
+            return post_text.strip()[:600]
     except Exception as e:
         print(f"⚠️ ดึงเนื้อหาโพสต์ {post_id} ไม่สำเร็จ: {e}")
     return ""
@@ -115,7 +138,6 @@ def generate_ai_reply(page_id: str, comment_text: str, post_context: str = "") -
     else:
         prompt = f"ลูกเพจคอมเมนต์ว่า: \"{comment_text}\"\nพิมพ์ตอบกลับให้ตรงประเด็น สั้นๆ 1 ประโยค:"
 
-    # ลองเรียกโมเดลหลัก (gemini-3.8-flash) ก่อน หากหนาแน่น (503) ให้สลับไป gemini-3.5-flash
     for model_name in ["gemini-3.8-flash", "gemini-3.5-flash"]:
         try:
             response = client.models.generate_content(
@@ -165,16 +187,17 @@ def reply_to_comment(comment_id: str, message: str, page_access_token: str) -> b
         print(f"❌ Request Error: {e}")
         return False
 
-async def process_human_like_reply(page_id: str, post_id: str, comment_id: str, message: str, sender_name: str, page_token: str):
-    """จำลองพฤติกรรมแอดมินคนจริง: รอเวลาไม่เท่ากัน + กดไลก์ + บางครั้งกดไลก์อย่างเดียวไม่ตอบ"""
+async def process_human_like_reply(page_id: str, post_id: str, comment_id: str, message: str, sender_id: str, sender_name: str, page_token: str):
+    """จำลองพฤติกรรมแอดมินคนจริง: รอเวลาไม่เท่ากัน + กดไลก์ + กันปั่นรายบุคคล"""
     # 1. สุ่มเวลารอระหว่าง 1 นาที (60 วิ) ถึง 3.5 นาที (210 วิ)
     delay = random.randint(60, 210)
     print(f"⏳ [เพจ {page_id}] รอ {delay} วินาที ก่อนจัดการคอมเมนต์ของ {sender_name}...")
     await asyncio.sleep(delay)
 
-    # 2. เช็กโควตาต่อชั่วโมง หากเกินลิมิตให้กดแค่ Like เพื่อความปลอดภัย
-    if not can_reply_now(page_id):
-        print(f"🛡️ เกินโควตา {MAX_REPLIES_PER_HOUR} ครั้ง/ชม. เปลี่ยนเป็นกด Like แทน")
+    # 2. เช็กโควตาต่อชั่วโมง (ทั้งภาพรวมเพจและรายบุคคล) หากเกินลิมิตให้กดแค่ Like
+    allowed, reason = can_reply_now(page_id, sender_id)
+    if not allowed:
+        print(f"🛡️ {reason} -> เปลี่ยนเป็นกด Like แทนเพื่อความปลอดภัย")
         like_comment(comment_id, page_token)
         return
 
@@ -192,7 +215,7 @@ async def process_human_like_reply(page_id: str, post_id: str, comment_id: str, 
     post_context = fetch_post_context(post_id, page_token)
     ai_reply = generate_ai_reply(page_id, message, post_context)
     if reply_to_comment(comment_id, ai_reply, page_token):
-        record_reply(page_id)
+        record_reply(page_id, sender_id)
 
 @app.get("/")
 async def health_check():
@@ -260,6 +283,7 @@ async def handle_webhook(request: Request, background_tasks: BackgroundTasks):
                             post_id,
                             comment_id,
                             message,
+                            sender_id,
                             sender_name,
                             page_token
                         )

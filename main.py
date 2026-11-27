@@ -1,4 +1,5 @@
 import os
+import re
 import json
 import time
 import random
@@ -38,7 +39,8 @@ ANTI_BOT_RULES = (
     "2. ห้ามทักทายชื่อคนคอมเมนต์ (ห้ามขึ้นต้นด้วย 'สวัสดีครับคุณ...')\n"
     "3. ห้ามใช้ภาษาทางการแบบคอลเซ็นเตอร์หรือ AI (ห้ามใช้คำว่า 'ยินดีเป็นอย่างยิ่ง', 'ขอขอบพระคุณ', 'สามารถสอบถามเพิ่มเติมได้')\n"
     "4. ใช้อีโมจิได้ไม่เกิน 1 ตัว หรือไม่ต้องใส่เลยก็ได้ในบางครั้ง เพื่อให้ดูไม่ซ้ำซาก\n"
-    "5. หากลูกเพจถามคำถาม ให้ตอบให้ตรงคำถามโดยอ้างอิงจากเนื้อหาโพสต์เป็นหลัก หากไม่มีข้อมูลในโพสต์ให้ตอบแบบเป็นกันเองโดยไม่เดามั่ว"
+    "5. หากลูกเพจถามคำถาม ให้ตอบให้ตรงคำถามโดยอ้างอิงจากเนื้อหาโพสต์เป็นหลัก หากไม่มีข้อมูลในโพสต์ให้ตอบแบบเป็นกันเองโดยไม่เดามั่ว\n"
+    "6. หากคอมเมนต์มีคำหยาบคาย ด่าทอ ทะเลาะวิวาท ดราม่า การเมือง ศาสนา เรื่องอ่อนไหว สแปมโฆษณา/ฝากร้าน หรือพิมพ์มั่วๆ แบบไม่มีความหมายจับใจความไม่ได้ ให้ตอบกลับมาแค่คำว่า '[SKIP]' เท่านั้น ห้ามแสดงความคิดเห็นใดๆ"
 )
 
 PAGE_PERSONAS = {
@@ -55,6 +57,20 @@ PAGE_PERSONAS = {
 DEFAULT_PERSONA = (
     "คุณคือแอดมินเพจ Facebook ตอบคอมเมนต์ลูกเพจแบบคนกันเอง สั้นๆ ตรงประเด็น\n" + ANTI_BOT_RULES
 )
+
+def is_meaningless_comment(text: str) -> bool:
+    """กรองคอมเมนต์ขยะเบื้องต้น เช่น สัญลักษณ์ล้วน ตัวเลขล้วน หรือการกดแป้นมั่วๆ"""
+    cleaned = text.strip()
+    if not cleaned:
+        return True
+    # ไม่มีตัวอักษรภาษาไทยหรือภาษาอังกฤษเลย (เช่น มีแต่ตัวเลข จุด หรืออิโมจิ)
+    if not re.search(r'[ก-๙a-zA-Z]', cleaned):
+        return True
+    # พิมพ์ตัวอักษรเดิมซ้ำๆ ทั้งข้อความ เช่น 'กกกกกก', 'aaaaa', '555555'
+    no_space = re.sub(r'\s+', '', cleaned)
+    if len(set(no_space)) == 1 and len(no_space) > 1:
+        return True
+    return False
 
 def can_reply_now(page_id: str, sender_id: str) -> tuple[bool, str]:
     """ตรวจสอบโควตาทั้งภาพรวมของเพจ และโควตารายบุคคลต่อชั่วโมง"""
@@ -135,7 +151,7 @@ def fetch_post_context(post_id: str, page_access_token: str) -> str:
     return ""
 
 def generate_ai_reply(page_id: str, comment_text: str, post_context: str = "") -> str:
-    """สร้างข้อความตอบกลับด้วย Gemini AI โดยอ้างอิงทั้งเนื้อหาโพสต์และคอมเมนต์"""
+    """สร้างข้อความตอบกลับด้วย Gemini AI โดยอ้างอิงทั้งเนื้อหาโพสต์และคอมเมนต์ (คืนค่า '[SKIP]' หากพบดราม่า/คำหยาบ/ไม่มีความหมาย)"""
     fallback_replies = [
         "ขอบคุณครับ 🙏",
         "ยินดีเลยครับผม",
@@ -153,10 +169,13 @@ def generate_ai_reply(page_id: str, comment_text: str, post_context: str = "") -
         prompt = (
             f"เนื้อหาโพสต์ของเพจ: \"{post_context}\"\n"
             f"ลูกเพจคอมเมนต์ใต้โพสต์นี้ว่า: \"{comment_text}\"\n"
-            f"พิมพ์ตอบกลับให้ตรงประเด็นกับคอมเมนต์และเนื้อหาโพสต์ สั้นๆ 1 ประโยค:"
+            f"วิเคราะห์คอมเมนต์ หากเป็นคำหยาบ ดราม่า เรื่องอ่อนไหว สแปม หรือพิมพ์มั่วไม่มีความหมายให้ตอบ '[SKIP]' หากปกติให้พิมพ์ตอบกลับสั้นๆ 1 ประโยค:"
         )
     else:
-        prompt = f"ลูกเพจคอมเมนต์ว่า: \"{comment_text}\"\nพิมพ์ตอบกลับให้ตรงประเด็น สั้นๆ 1 ประโยค:"
+        prompt = (
+            f"ลูกเพจคอมเมนต์ว่า: \"{comment_text}\"\n"
+            f"วิเคราะห์คอมเมนต์ หากเป็นคำหยาบ ดราม่า เรื่องอ่อนไหว สแปม หรือพิมพ์มั่วไม่มีความหมายให้ตอบ '[SKIP]' หากปกติให้พิมพ์ตอบกลับสั้นๆ 1 ประโยค:"
+        )
 
     for model_name in ["gemini-3.8-flash", "gemini-3.5-flash"]:
         try:
@@ -208,7 +227,7 @@ def reply_to_comment(comment_id: str, message: str, page_access_token: str) -> b
         return False
 
 async def process_human_like_reply(page_id: str, post_id: str, comment_id: str, message: str, sender_id: str, sender_name: str, page_token: str):
-    """จำลองพฤติกรรมแอดมินคนจริง: รอเวลาไม่เท่ากัน + เช็กแอดมินตอบเอง + กดไลก์ + กันปั่นรายบุคคล"""
+    """จำลองพฤติกรรมแอดมินคนจริง: รอเวลา + เช็กแอดมินตอบเอง + กรองดราม่า/ขยะ + กดไลก์ + กันปั่นรายบุคคล"""
     # 1. สุ่มเวลารอระหว่าง 1 นาที (60 วิ) ถึง 3.5 นาที (210 วิ)
     delay = random.randint(60, 210)
     print(f"⏳ [เพจ {page_id}] รอ {delay} วินาที ก่อนจัดการคอมเมนต์ของ {sender_name}...")
@@ -219,26 +238,32 @@ async def process_human_like_reply(page_id: str, post_id: str, comment_id: str, 
         print(f"🙋‍♂️ แอดมินตอบคอมเมนต์ {comment_id} ไปแล้ว บอทยกเลิกการตอบซ้ำ")
         return
 
-    # 3. เช็กโควตาต่อชั่วโมง (ทั้งภาพรวมเพจและรายบุคคล) หากเกินลิมิตให้กดแค่ Like
+    # 3. ดึงบริบทโพสต์ต้นทาง + สร้างคำตอบ (และเช็กคัดกรองดราม่า/คำหยาบ/ไม่มีความหมายก่อนทำรายการใดๆ)
+    post_context = fetch_post_context(post_id, page_token)
+    ai_reply = generate_ai_reply(page_id, message, post_context)
+
+    if "[SKIP]" in ai_reply.upper():
+        print(f"🚫 ตรวจพบคอมเมนต์อ่อนไหว/ดราม่า/ไม่มีความหมาย ({comment_id}) -> บอทข้ามการกดไลก์และตอบกลับทันที")
+        return
+
+    # 4. เช็กโควตาต่อชั่วโมง (ทั้งภาพรวมเพจและรายบุคคล) หากเกินลิมิตให้กดแค่ Like
     allowed, reason = can_reply_now(page_id, sender_id)
     if not allowed:
         print(f"🛡️ {reason} -> เปลี่ยนเป็นกด Like แทนเพื่อความปลอดภัย")
         like_comment(comment_id, page_token)
         return
 
-    # 4. สุ่มพฤติกรรม: 85% กดไลก์ + ตอบกลับ / 15% กดไลก์อย่างเดียว (เหมือนแอดมินอ่านแล้วถูกใจ)
+    # 5. สุ่มพฤติกรรม: 85% กดไลก์ + ตอบกลับ / 15% กดไลก์อย่างเดียว (เหมือนแอดมินอ่านแล้วถูกใจ)
     if random.random() < 0.15:
         print(f"🎲 สุ่มเลือกกด Like อย่างเดียวสำหรับคอมเมนต์นี้ (เพื่อความเป็นธรรมชาติ)")
         like_comment(comment_id, page_token)
         return
 
-    # 5. กดไลก์คอมเมนต์ก่อน แล้วเว้นจังหวะพิมพ์ 3-8 วินาที เหมือนคนกำลังพิมพ์
+    # 6. กดไลก์คอมเมนต์ก่อน แล้วเว้นจังหวะพิมพ์ 3-8 วินาที เหมือนคนกำลังพิมพ์
     like_comment(comment_id, page_token)
     await asyncio.sleep(random.randint(3, 8))
 
-    # 6. ดึงบริบทโพสต์ต้นทาง + สร้างคำตอบที่ตรงประเด็นและส่งกลับ
-    post_context = fetch_post_context(post_id, page_token)
-    ai_reply = generate_ai_reply(page_id, message, post_context)
+    # 7. ส่งคำตอบกลับ
     if reply_to_comment(comment_id, ai_reply, page_token):
         record_reply(page_id, sender_id)
 
@@ -299,6 +324,11 @@ async def handle_webhook(request: Request, background_tasks: BackgroundTasks):
                             continue
 
                         if not message or not comment_id:
+                            continue
+
+                        # ข้ามคอมเมนต์สัญลักษณ์ล้วน ตัวเลขล้วน หรือพิมพ์ซ้ำตัวเดียวตั้งแต่ต้นทาง
+                        if is_meaningless_comment(message):
+                            print(f"⏭️ ข้ามคอมเมนต์ไม่มีความหมายจาก {sender_name}: {message}")
                             continue
 
                         print(f"📩 คอมเมนต์ใหม่จากเพจ {page_id} โดย {sender_name}: {message}")

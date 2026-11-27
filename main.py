@@ -95,6 +95,26 @@ def record_reply(page_id: str, sender_id: str):
             user_reply_timestamps[user_key] = deque()
         user_reply_timestamps[user_key].append(now)
 
+def has_page_already_replied(comment_id: str, page_id: str, page_access_token: str) -> bool:
+    """ตรวจสอบว่าแอดมินได้เข้าไปตอบกลับคอมเมนต์นี้ด้วยตัวเองไปก่อนหน้าแล้วหรือไม่"""
+    url = f"https://graph.facebook.com/v27.0/{comment_id}/comments"
+    params = {
+        "fields": "from",
+        "limit": 10,
+        "access_token": page_access_token
+    }
+    try:
+        res = requests.get(url, params=params, timeout=8)
+        if res.status_code == 200:
+            replies = res.json().get("data", [])
+            for rep in replies:
+                rep_from_id = str(rep.get("from", {}).get("id", ""))
+                if rep_from_id == page_id or rep_from_id in PAGES_CONFIG:
+                    return True
+    except Exception as e:
+        print(f"⚠️ เช็กคอมเมนต์ย่อยของ {comment_id} ไม่สำเร็จ: {e}")
+    return False
+
 def fetch_post_context(post_id: str, page_access_token: str) -> str:
     """ดึงข้อความของโพสต์ต้นทางเพื่อให้ AI ตอบคอมเมนต์ได้ตรงบริบท"""
     if not post_id:
@@ -188,30 +208,35 @@ def reply_to_comment(comment_id: str, message: str, page_access_token: str) -> b
         return False
 
 async def process_human_like_reply(page_id: str, post_id: str, comment_id: str, message: str, sender_id: str, sender_name: str, page_token: str):
-    """จำลองพฤติกรรมแอดมินคนจริง: รอเวลาไม่เท่ากัน + กดไลก์ + กันปั่นรายบุคคล"""
+    """จำลองพฤติกรรมแอดมินคนจริง: รอเวลาไม่เท่ากัน + เช็กแอดมินตอบเอง + กดไลก์ + กันปั่นรายบุคคล"""
     # 1. สุ่มเวลารอระหว่าง 1 นาที (60 วิ) ถึง 3.5 นาที (210 วิ)
     delay = random.randint(60, 210)
     print(f"⏳ [เพจ {page_id}] รอ {delay} วินาที ก่อนจัดการคอมเมนต์ของ {sender_name}...")
     await asyncio.sleep(delay)
 
-    # 2. เช็กโควตาต่อชั่วโมง (ทั้งภาพรวมเพจและรายบุคคล) หากเกินลิมิตให้กดแค่ Like
+    # 2. เช็กว่าแอดมินเข้าไปตอบเองก่อนหน้านี้หรือยัง หากตอบแล้วให้ข้ามทันที
+    if has_page_already_replied(comment_id, page_id, page_token):
+        print(f"🙋‍♂️ แอดมินตอบคอมเมนต์ {comment_id} ไปแล้ว บอทยกเลิกการตอบซ้ำ")
+        return
+
+    # 3. เช็กโควตาต่อชั่วโมง (ทั้งภาพรวมเพจและรายบุคคล) หากเกินลิมิตให้กดแค่ Like
     allowed, reason = can_reply_now(page_id, sender_id)
     if not allowed:
         print(f"🛡️ {reason} -> เปลี่ยนเป็นกด Like แทนเพื่อความปลอดภัย")
         like_comment(comment_id, page_token)
         return
 
-    # 3. สุ่มพฤติกรรม: 85% กดไลก์ + ตอบกลับ / 15% กดไลก์อย่างเดียว (เหมือนแอดมินอ่านแล้วถูกใจ)
+    # 4. สุ่มพฤติกรรม: 85% กดไลก์ + ตอบกลับ / 15% กดไลก์อย่างเดียว (เหมือนแอดมินอ่านแล้วถูกใจ)
     if random.random() < 0.15:
         print(f"🎲 สุ่มเลือกกด Like อย่างเดียวสำหรับคอมเมนต์นี้ (เพื่อความเป็นธรรมชาติ)")
         like_comment(comment_id, page_token)
         return
 
-    # 4. กดไลก์คอมเมนต์ก่อน แล้วเว้นจังหวะพิมพ์ 3-8 วินาที เหมือนคนกำลังพิมพ์
+    # 5. กดไลก์คอมเมนต์ก่อน แล้วเว้นจังหวะพิมพ์ 3-8 วินาที เหมือนคนกำลังพิมพ์
     like_comment(comment_id, page_token)
     await asyncio.sleep(random.randint(3, 8))
 
-    # 5. ดึงบริบทโพสต์ต้นทาง + สร้างคำตอบที่ตรงประเด็นและส่งกลับ
+    # 6. ดึงบริบทโพสต์ต้นทาง + สร้างคำตอบที่ตรงประเด็นและส่งกลับ
     post_context = fetch_post_context(post_id, page_token)
     ai_reply = generate_ai_reply(page_id, message, post_context)
     if reply_to_comment(comment_id, ai_reply, page_token):
